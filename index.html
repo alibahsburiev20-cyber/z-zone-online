@@ -2,39 +2,126 @@
 <html lang="ru">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, orientation=landscape">
-    <title>Z-Zone Online</title>
-    <link rel="stylesheet" href="style.css">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <title>Z-Zone 3D Мультиплеер</title>
+    
     <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+    
+    <style>
+        /* Сброс стилей, чтобы игра была на весь экран */
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+            user-select: none;
+            -webkit-user-select: none;
+            touch-action: none; /* Отключаем системные жесты браузера */
+        }
+
+        body, html {
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            background-color: #1a1c1e;
+            font-family: 'Arial', sans-serif;
+        }
+
+        /* Наш 3D Canvas */
+        #gameCanvas {
+            display: block;
+            width: 100vw;
+            height: 100vh;
+            position: absolute;
+            top: 0;
+            left: 0;
+            z-index: 1;
+        }
+
+        /* Кнопка переключения режимов лица (1-е, 3-е, 2D) */
+        #cam-toggle {
+            position: absolute;
+            top: 16px;
+            left: 16px;
+            z-index: 100;
+            padding: 12px 18px;
+            background: rgba(20, 20, 20, 0.85);
+            color: #ffffff;
+            border: 2px solid #ffffff;
+            border-radius: 8px;
+            font-size: 14px;
+            font-weight: bold;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.3);
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+        #cam-toggle:active {
+            background: #ff4444;
+        }
+
+        /* Визуальная зона левого джойстика (невидимка, но для понимания) */
+        #joystick-zone {
+            position: absolute;
+            bottom: 40px;
+            left: 40px;
+            width: 100px;
+            height: 100px;
+            background: rgba(255, 255, 255, 0.08);
+            border: 2px dashed rgba(255, 255, 255, 0.2);
+            border-radius: 50%;
+            z-index: 10;
+            pointer-events: none; /* Чтобы тачи проходили сквозь саму плашку */
+        }
+
+        /* Индикатор центра джойстика */
+        #joystick-center {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            width: 40px;
+            height: 40px;
+            background: rgba(255, 255, 255, 0.4);
+            border-radius: 50%;
+            transform: translate(-50%, -50%);
+        }
+
+        /* Скрытое меню крафта (на будущее) */
+        .hidden {
+            display: none !important;
+        }
+        #craft-menu {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            width: 280px;
+            background: rgba(0, 0, 0, 0.9);
+            border: 2px solid #555;
+            border-radius: 10px;
+            padding: 20px;
+            color: white;
+            z-index: 150;
+            text-align: center;
+        }
+    </style>
 </head>
 <body>
 
-    <div id="turn-screen">
-        <div class="turn-message">🔄 Пожалуйста, переверните устройство в горизонтальный режим!</div>
-    </div>
+    <button id="cam-toggle">Камера: 1-е лицо</button>
 
     <canvas id="gameCanvas"></canvas>
 
-    <div id="ui-layer">
-        <div class="hud-bar-container">
-            <div id="hp-bar" class="hud-bar">HP: 100</div>
-        </div>
-        <button id="craft-btn" onclick="toggleCraftMenu()">Крафт / Инвентарь</button>
+    <div id="joystick-zone">
+        <div id="joystick-center"></div>
     </div>
 
     <div id="craft-menu" class="hidden">
-        <h3>Доступные крафты</h3>
-        <div id="recipes-list">
-            <div class="recipe-item">
-                <span>Дубина (5 Дерева)</span>
-                <button onclick="sendCraft('wood_club')">Скрафтить</button>
-            </div>
-        </div>
-        <button onclick="toggleCraftMenu()" class="close-btn">Закрыть</button>
+        <h3>Верстак Ali Style</h3>
+        <hr style="margin: 10px 0; border-color: #444;">
+        <p>Недостаточно ресурсов</p>
     </div>
 
-    <div id="joystick-zone"></div>
-
+    <script src="Ali3D.js"></script>
     <script src="app.js"></script>
+
 </body>
 </html>
