@@ -1,4 +1,3 @@
-// Подключение к серверу Render
 const socket = io('https://z-zone-online.onrender.com');
 
 const canvas = document.getElementById('gameCanvas');
@@ -14,7 +13,6 @@ resizeCanvas();
 let localPlayers = {};
 let myId = "local_player"; 
 
-// Стартовые координаты в плоском мире (внутри изометрии они развернутся)
 localPlayers[myId] = {
     id: myId,
     x: 1500, 
@@ -22,75 +20,96 @@ localPlayers[myId] = {
     hp: 100
 };
 
-// --- НАСТРОЙКИ ИЗОМЕТРИЧЕСКОГО МИРА ---
-const TILE_SIZE = 48;       // Ширина/высота стороны плоского ромба
-const CHUNK_SIZE = 8;      // Сколько тайлов в одном чанке
+// --- НАСТРОЙКИ МИРА, КОЛЛИЗИЙ И СЕТИ ---
+const TILE_SIZE = 48;       
+const CHUNK_SIZE = 8;      
 const CHUNK_PIXELS = CHUNK_SIZE * TILE_SIZE; 
 
-const loadedChunks = {};
+const PLAYER_RADIUS = 14;
+const TREE_RADIUS = 16;
+const STONE_RADIUS = 12;
+const ZOMBIE_RADIUS = 14;
 
-// Магическая функция перевода плоских координат (X, Y) в Изометрию (2.5D)
+const loadedChunks = {};
+let networkZombies = []; // Сюда складываем зомби, если мы НЕ хост
+
 function toIso(x, y) {
-    return {
-        x: (x - y),
-        y: (x + y) / 2
-    };
+    return { x: (x - y), y: (x + y) / 2 };
 }
 
-// Генератор чанков (срез текстуры по Сиду)
+// Проверяем, являемся ли мы хостом (самым главным в сессии)
+function isHost() {
+    const playerIds = Object.keys(localPlayers).sort();
+    return playerIds[0] === myId; 
+}
+
+// Генератор чанков
 function getChunk(chunkX, chunkY) {
     const chunkKey = `${chunkX},${chunkY}`;
     if (loadedChunks[chunkKey]) return loadedChunks[chunkKey];
 
     const tiles = [];
+    const zombies = [];
+
     for (let x = 0; x < CHUNK_SIZE; x++) {
         tiles[x] = [];
         for (let y = 0; y < CHUNK_SIZE; y++) {
             const worldTileX = chunkX * CHUNK_SIZE + x;
             const worldTileY = chunkY * CHUNK_SIZE + y;
             
-            // Псевдослучайный генератор шума
             const noise = Math.abs(Math.sin(worldTileX * 12.9898 + worldTileY * 78.233)) * 43758.5453 % 1;
             
-            let color = '#3c7a2b'; // Базовая трава
+            let color = '#3c7a2b'; 
             let hasStaticObject = null;
 
-            if (noise > 0.88) color = '#488e35'; // Светлая трава
-            if (noise < 0.12) color = '#326623'; // Тёмная трава
+            if (noise > 0.88) color = '#488e35'; 
+            if (noise < 0.12) color = '#326623'; 
             
-            // Вшиваем редкий спавн декораций (деревья/камни) по шуму
             if (noise > 0.96) {
                 hasStaticObject = 'tree';
-            } else if (noise < 0.03) {
+            } else if (noise < 0.02) {
                 hasStaticObject = 'stone';
             }
-
+            
             tiles[x][y] = { color: color, object: hasStaticObject };
+
+            // Локальный спавн зомби для генерации базовых ID
+            if (!hasStaticObject && noise > 0.94 && noise < 0.955) {
+                zombies.push({
+                    id: `zombie_${worldTileX}_${worldTileY}`, // Уникальный ID зомби по его координате спавна
+                    x: worldTileX * TILE_SIZE + TILE_SIZE / 2,
+                    y: worldTileY * TILE_SIZE + TILE_SIZE / 2,
+                    targetX: worldTileX * TILE_SIZE + TILE_SIZE / 2,
+                    targetY: worldTileY * TILE_SIZE + TILE_SIZE / 2,
+                    speed: 1.5,
+                    hp: 50,
+                    state: 'idle',
+                    lastDecision: 0
+                });
+            }
         }
     }
 
-    loadedChunks[chunkKey] = { tiles: tiles };
+    loadedChunks[chunkKey] = { tiles: tiles, zombies: zombies };
     return loadedChunks[chunkKey];
 }
 
-// Рисование изометрического ромба земли
 function drawIsoTile(screenX, screenY, size, color) {
     ctx.fillStyle = color;
     ctx.beginPath();
-    ctx.moveTo(screenX, screenY);                // Верхний угол ромба
-    ctx.lineTo(screenX + size, screenY + size/2); // Правый угол
-    ctx.lineTo(screenX, screenY + size);         // Нижний угол
-    ctx.lineTo(screenX - size, screenY + size/2); // Левый угол
+    ctx.moveTo(screenX, screenY);                
+    ctx.lineTo(screenX + size, screenY + size/2); 
+    ctx.lineTo(screenX, screenY + size);         
+    ctx.lineTo(screenX - size, screenY + size/2); 
     ctx.closePath();
     ctx.fill();
 
-    // Легкая сетка между ромбами
-    ctx.strokeStyle = 'rgba(0, 0, 0, 0.08)';
+    ctx.strokeStyle = 'rgba(0, 0, 0, 0.06)';
     ctx.lineWidth = 1;
     ctx.stroke();
 }
 
-// --- МОБИЛЬНОЕ УПРАВЛЕНИЕ ---
+// --- УПРАВЛЕНИЕ ---
 const joystickZone = document.getElementById('joystick-zone');
 let joystickActive = false;
 let joystickStart = { x: 0, y: 0 };
@@ -102,7 +121,6 @@ window.addEventListener('touchstart', (e) => {
         joystickActive = true;
         joystickStart = { x: touch.clientX, y: touch.clientY };
         joystickCurrent = { x: touch.clientX, y: touch.clientY };
-        
         joystickZone.style.left = (touch.clientX - 50) + 'px';
         joystickZone.style.bottom = (window.innerHeight - touch.clientY - 50) + 'px';
     }
@@ -158,24 +176,71 @@ socket.on('playerMoved', (playerInfo) => {
 
 socket.on('playerDisconnected', (id) => { delete localPlayers[id]; });
 
+// ПРИЕМ СИНХРОНИЗАЦИИ ЗОМБИ ОТ ХОСТА
+socket.on('zombiesUpdate', (data) => {
+    if (!isHost()) {
+        networkZombies = data.zombies; // Записываем чужих зомби
+    }
+});
+
 let lastUpdateTime = 0;
+let lastZombieNetTime = 0;
 
 // --- ГЛАВНЫЙ ИГРОВОЙ ЦИКЛ ---
 function gameLoop() {
     ctx.clearRect(0, 0, canvas.width, canvas.height);
 
     const me = localPlayers[myId];
+    if (!me) { requestAnimationFrame(gameLoop); return; }
 
-    // Логика бега (расчёт в 2D-осях, который плавно проецируется в изометрию)
-    if (joystickActive && me) {
+    const activeObstacles = [];
+    const localZombies = [];
+
+    const currentChunkX = Math.floor(me.x / CHUNK_PIXELS);
+    const currentChunkY = Math.floor(me.y / CHUNK_PIXELS);
+    const viewRadius = 2; 
+
+    // Сбор объектов из чанков
+    for (let cx = currentChunkX - viewRadius; cx <= currentChunkX + viewRadius; cx++) {
+        for (let cy = currentChunkY - viewRadius; cy <= currentChunkY + viewRadius; cy++) {
+            const chunk = getChunk(cx, cy);
+
+            for (let x = 0; x < CHUNK_SIZE; x++) {
+                for (let y = 0; y < CHUNK_SIZE; y++) {
+                    if (chunk.tiles[x][y].object) {
+                        activeObstacles.push({
+                            type: chunk.tiles[x][y].object,
+                            x: (cx * CHUNK_SIZE + x) * TILE_SIZE + TILE_SIZE / 2,
+                            y: (cy * CHUNK_SIZE + y) * TILE_SIZE + TILE_SIZE / 2,
+                            radius: chunk.tiles[x][y].object === 'tree' ? TREE_RADIUS : STONE_RADIUS
+                        });
+                    }
+                }
+            }
+            chunk.zombies.forEach(z => localZombies.push(z));
+        }
+    }
+
+    // 1. ДВИЖЕНИЕ И КОЛЛИЗИИ ИГРОКА
+    if (joystickActive) {
         const dx = joystickCurrent.x - joystickStart.x;
         const dy = joystickCurrent.y - joystickStart.y;
         const distance = Math.sqrt(dx * dx + dy * dy);
 
         if (distance > 5) {
             const speed = 4;
-            me.x += (dx / distance) * speed;
-            me.y += (dy / distance) * speed;
+            let nextX = me.x + (dx / distance) * speed;
+            let nextY = me.y + (dy / distance) * speed;
+
+            let canMoveX = true; let canMoveY = true;
+
+            for (let obs of activeObstacles) {
+                if (Math.sqrt(Math.pow(nextX - obs.x, 2) + Math.pow(me.y - obs.y, 2)) < PLAYER_RADIUS + obs.radius) canMoveX = false;
+                if (Math.sqrt(Math.pow(me.x - obs.x, 2) + Math.pow(nextY - obs.y, 2)) < PLAYER_RADIUS + obs.radius) canMoveY = false;
+            }
+
+            if (canMoveX) me.x = nextX;
+            if (canMoveY) me.y = nextY;
 
             const now = Date.now();
             if (myId !== "local_player" && now - lastUpdateTime > 45) {
@@ -185,166 +250,152 @@ function gameLoop() {
         }
     }
 
-    if (!me) {
-        requestAnimationFrame(gameLoop);
-        return;
+    // 2. РАСЧЁТ ИИ ЗОМБИ (ТОЛЬКО ЕСЛИ МЫ ХОСТ!)
+    const now = Date.now();
+    if (isHost()) {
+        localZombies.forEach(z => {
+            // Находим БЛИЖАЙШЕГО игрока среди всех в мультиплеере для агра зомби
+            let closestPlayer = me;
+            let minDist = Math.sqrt(Math.pow(me.x - z.x, 2) + Math.pow(me.y - z.y, 2));
+
+            Object.keys(localPlayers).forEach(id => {
+                const p = localPlayers[id];
+                const d = Math.sqrt(Math.pow(p.x - z.x, 2) + Math.pow(p.y - z.y, 2));
+                if (d < minDist) { minDist = d; closestPlayer = p; }
+            });
+
+            if (minDist < 300) {
+                z.state = 'chase'; z.targetX = closestPlayer.x; z.targetY = closestPlayer.y;
+            } else {
+                if (z.state === 'chase') z.state = 'idle';
+                if (now - z.lastDecision > 2000) {
+                    z.lastDecision = now;
+                    if (Math.random() > 0.5) {
+                        z.targetX = z.x + (Math.random() * 120 - 60); z.targetY = z.y + (Math.random() * 120 - 60);
+                    }
+                }
+            }
+
+            const zDx = z.targetX - z.x; const zDy = z.targetY - z.y;
+            const zDist = Math.sqrt(zDx * zDx + zDy * zDy);
+
+            if (zDist > 5) {
+                let zNextX = z.x + (zDx / zDist) * z.speed; let zNextY = z.y + (zDy / zDist) * z.speed;
+                let zCanMoveX = true; let zCanMoveY = true;
+
+                for (let obs of activeObstacles) {
+                    if (Math.sqrt(Math.pow(zNextX - obs.x, 2) + Math.pow(z.y - obs.y, 2)) < ZOMBIE_RADIUS + obs.radius) zCanMoveX = false;
+                    if (Math.sqrt(Math.pow(z.x - obs.x, 2) + Math.pow(zNextY - obs.y, 2)) < ZOMBIE_RADIUS + obs.radius) zCanMoveY = false;
+                }
+                if (zCanMoveX) z.x = zNextX; if (zCanMoveY) z.y = zNextY;
+            }
+        });
+
+        // Отправляем наши расчеты зомби на сервер раз в 60мс
+        if (now - lastZombieNetTime > 60 && myId !== "local_player") {
+            // Передаем только самое нужное, чтобы разгрузить сеть
+            const pack = localZombies.map(z => ({ id: z.id, x: z.x, y: z.y, state: z.state }));
+            socket.emit('shareZombies', pack); 
+            lastZombieNetTime = now;
+        }
     }
 
-    // РАСЧЁТ КАМЕРЫ ДЛЯ ИЗОМЕТРИИ
+    // РАСЧЁТ КАМЕРЫ
     const myIso = toIso(me.x, me.y);
     const cameraX = canvas.width / 2 - myIso.x;
     const cameraY = canvas.height / 2 - myIso.y;
 
-    // Вычисляем, в каком плоском чанке мы находимся
-    const currentChunkX = Math.floor(me.x / CHUNK_PIXELS);
-    const currentChunkY = Math.floor(me.y / CHUNK_PIXELS);
-    
-    const viewRadius = 2; // Радиус рендера чанков вокруг игрока
-    
-    // Массив для Z-Sorting (сюда собираем игроков и объекты, чтобы рисовать их по глубине)
-    const renderQueue = [];
-
-    // 1. СНАЧАЛА РИСУЕМ ТОЛЬКО ЗЕМЛЮ (НИЖНИЙ СЛОЙ)
+    // 3. ОТРИСОВКА ЗЕМЛИ
     for (let cx = currentChunkX - viewRadius; cx <= currentChunkX + viewRadius; cx++) {
         for (let cy = currentChunkY - viewRadius; cy <= currentChunkY + viewRadius; cy++) {
             const chunk = getChunk(cx, cy);
-
             for (let x = 0; x < CHUNK_SIZE; x++) {
                 for (let y = 0; y < CHUNK_SIZE; y++) {
-                    const worldX = (cx * CHUNK_SIZE + x) * TILE_SIZE;
-                    const worldY = (cy * CHUNK_SIZE + y) * TILE_SIZE;
-
-                    // Переводим координаты блока в 2.5D
+                    const worldX = (cx * CHUNK_SIZE + x) * TILE_SIZE; const worldY = (cy * CHUNK_SIZE + y) * TILE_SIZE;
                     const isoTile = toIso(worldX, worldY);
-                    const screenX = isoTile.x + cameraX;
-                    const screenY = isoTile.y + cameraY;
+                    const screenX = isoTile.x + cameraX; const screenY = isoTile.y + cameraY;
 
-                    // Отрисовка ромба травы, если он виден на экране телефона
                     if (screenX >= -TILE_SIZE*2 && screenX <= canvas.width + TILE_SIZE*2 &&
                         screenY >= -TILE_SIZE*2 && screenY <= canvas.height + TILE_SIZE*2) {
-                        
                         drawIsoTile(screenX, screenY, TILE_SIZE, chunk.tiles[x][y].color);
-
-                        // Если на тайле есть объект (дерево/камень), кидаем его в очередь рендера верхнего слоя
-                        if (chunk.tiles[x][y].object) {
-                            renderQueue.push({
-                                type: chunk.tiles[x][y].object,
-                                worldX: worldX + TILE_SIZE/2,
-                                worldY: worldY + TILE_SIZE/2,
-                                sortY: worldX + worldY + TILE_SIZE // Глубина для изометрии
-                            });
-                        }
                     }
                 }
             }
         }
     }
 
-    // Добавляем всех активных игроков в ту же очередь рендера верхнего слоя
-    Object.keys(localPlayers).forEach((id) => {
-        const p = localPlayers[id];
-        
-        // Плавная интерполяция шагов для чужих игроков
-        if (id !== myId && p.targetX !== undefined && p.targetY !== undefined) {
-            p.x += (p.targetX - p.x) * 0.15;
-            p.y += (p.targetY - p.y) * 0.15;
-        }
+    // 4. СБОРКА ДЛЯ Z-SORTING
+    const renderQueue = [];
 
-        renderQueue.push({
-            type: 'player',
-            id: id,
-            worldX: p.x,
-            worldY: p.y,
-            sortY: p.x + p.y // Сортировочная глубина персонажа
-        });
+    activeObstacles.forEach(obs => {
+        renderQueue.push({ type: obs.type, worldX: obs.x, worldY: obs.y, sortY: obs.x + obs.y });
     });
 
-    // 🔥 СВЯТАЯ МАГИЯ ГЕЙМДЕВА: Сортируем объекты по глубине Y
-    // Кто стоит дальше (выше на экране) — рендерится первым. Кто ближе — перекрывает их!
+    // Отрисовка зомби: берем либо свои расчеты (если хост), либо данные из сети (если зашли к кому-то)
+    const zombiesToRender = isHost() ? localZombies : networkZombies;
+    zombiesToRender.forEach(z => {
+        // Если мы не хост, плавно интерполируем движения зомби из сети, чтоб они не прыгали рывками
+        if (!isHost()) {
+            const localZombieRef = localZombies.find(lz => lz.id === z.id);
+            if (localZombieRef) {
+                localZombieRef.x += (z.x - localZombieRef.x) * 0.2;
+                localZombieRef.y += (z.y - localZombieRef.y) * 0.2;
+                z.x = localZombieRef.x; z.y = localZombieRef.y;
+            }
+        }
+        renderQueue.push({ type: 'zombie', worldX: z.x, worldY: z.y, sortY: z.x + z.y, state: z.state });
+    });
+
+    Object.keys(localPlayers).forEach((id) => {
+        const p = localPlayers[id];
+        if (id !== myId && p.targetX !== undefined && p.targetY !== undefined) {
+            p.x += (p.targetX - p.x) * 0.15; p.y += (p.targetY - p.y) * 0.15;
+        }
+        renderQueue.push({ type: 'player', id: id, worldX: p.x, worldY: p.y, sortY: p.x + p.y });
+    });
+
     renderQueue.sort((a, b) => a.sortY - b.sortY);
 
-    // 2. РИСУЕМ ВЕРХНИЙ СЛОЙ (ИГРОКИ, ДЕРЕВЬЯ, КАМНИ) С УЧЕТОМ СОРТИРОВКИ
+    // 5. ОТРИСОВКА ВЕРХНЕГО СЛОЯ
     renderQueue.forEach((obj) => {
         const isoPos = toIso(obj.worldX, obj.worldY);
-        const screenX = isoPos.x + cameraX;
-        const screenY = isoPos.y + cameraY;
+        const screenX = isoPos.x + cameraX; const screenY = isoPos.y + cameraY;
 
         if (obj.type === 'player') {
-            // --- РЕНДЕР ИГРОКА ---
-            // 1. Овальная тень под ногами
-            ctx.fillStyle = 'rgba(0, 0, 0, 0.25)';
-            ctx.beginPath();
-            ctx.ellipse(screenX, screenY + 2, 16, 8, 0, 0, Math.PI * 2);
-            ctx.fill();
-
-            // 2. Тело (Круг-фишка)
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.25)'; ctx.beginPath(); ctx.ellipse(screenX, screenY + 2, 16, 8, 0, 0, Math.PI * 2); ctx.fill();
             ctx.fillStyle = (obj.id === myId) ? '#00ff66' : '#ff3333';
-            ctx.beginPath();
-            ctx.arc(screenX, screenY - 12, 18, 0, Math.PI * 2); // Смещаем чуть вверх относительно тени
-            ctx.fill();
-            ctx.strokeStyle = '#fff';
-            ctx.lineWidth = 3;
-            ctx.stroke();
-
-            // 3. Никнейм над головой
-            ctx.fillStyle = '#fff';
-            ctx.font = 'bold 13px Arial';
-            ctx.textAlign = 'center';
+            ctx.beginPath(); ctx.arc(screenX, screenY - 12, 18, 0, Math.PI * 2); ctx.fill();
+            ctx.strokeStyle = '#fff'; ctx.lineWidth = 3; ctx.stroke();
+            ctx.fillStyle = '#fff'; ctx.font = 'bold 13px Arial'; ctx.textAlign = 'center';
             ctx.fillText(obj.id === myId ? "Вы" : `Игрок_${obj.id.substring(0, 4)}`, screenX, screenY - 40);
 
+        } else if (obj.type === 'zombie') {
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.3)'; ctx.beginPath(); ctx.ellipse(screenX, screenY + 2, 16, 8, 0, 0, Math.PI * 2); ctx.fill();
+            ctx.fillStyle = '#4a753c'; ctx.beginPath(); ctx.arc(screenX, screenY - 12, 18, 0, Math.PI * 2); ctx.fill();
+            ctx.strokeStyle = '#223d19'; ctx.lineWidth = 3; ctx.stroke();
+            ctx.fillStyle = obj.state === 'chase' ? '#ff0000' : '#ff9900';
+            ctx.beginPath(); ctx.arc(screenX - 5, screenY - 16, 3, 0, Math.PI * 2); ctx.fill();
+            ctx.beginPath(); ctx.arc(screenX + 5, screenY - 16, 3, 0, Math.PI * 2); ctx.fill();
+            ctx.fillStyle = '#ff4444'; ctx.font = '900 11px Arial'; ctx.textAlign = 'center';
+            ctx.fillText(obj.state === 'chase' ? "⚠️ ЗОМБИ" : "Zzz...", screenX, screenY - 38);
+
         } else if (obj.type === 'tree') {
-            // --- РЕНДЕР ИЗОМЕТРИЧЕСКОГО ДЕРЕВА ---
-            // Тень дерева
-            ctx.fillStyle = 'rgba(0, 0, 0, 0.3)';
-            ctx.beginPath();
-            ctx.ellipse(screenX, screenY, 20, 10, 0, 0, Math.PI * 2);
-            ctx.fill();
-
-            // Ствол дерева
-            ctx.fillStyle = '#6e4720';
-            ctx.fillRect(screenX - 5, screenY - 35, 10, 35);
-
-            // Крона (Листва) — объемный ромб-шапка
-            ctx.fillStyle = '#1e5912';
-            ctx.beginPath();
-            ctx.arc(screenX, screenY - 50, 24, 0, Math.PI * 2);
-            ctx.fill();
-            ctx.fillStyle = '#266e18';
-            ctx.beginPath();
-            ctx.arc(screenX - 6, screenY - 54, 18, 0, Math.PI * 2);
-            ctx.fill();
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.3)'; ctx.beginPath(); ctx.ellipse(screenX, screenY, 20, 10, 0, 0, Math.PI * 2); ctx.fill();
+            ctx.fillStyle = '#6e4720'; ctx.fillRect(screenX - 5, screenY - 35, 10, 35);
+            ctx.fillStyle = '#1e5912'; ctx.beginPath(); ctx.arc(screenX, screenY - 50, 24, 0, Math.PI * 2); ctx.fill();
+            ctx.fillStyle = '#266e18'; ctx.beginPath(); ctx.arc(screenX - 6, screenY - 54, 18, 0, Math.PI * 2); ctx.fill();
 
         } else if (obj.type === 'stone') {
-            // --- РЕНДЕР КАМНЯ ---
-            ctx.fillStyle = 'rgba(0, 0, 0, 0.2)';
-            ctx.beginPath();
-            ctx.ellipse(screenX, screenY + 2, 14, 7, 0, 0, Math.PI * 2);
-            ctx.fill();
-
-            ctx.fillStyle = '#7a7a7a';
-            ctx.beginPath();
-            ctx.moveTo(screenX - 12, screenY);
-            ctx.lineTo(screenX, screenY - 14);
-            ctx.lineTo(screenX + 12, screenY);
-            ctx.lineTo(screenX + 6, screenY + 6);
-            ctx.lineTo(screenX - 6, screenY + 6);
-            ctx.closePath();
-            ctx.fill();
-            
-            ctx.fillStyle = '#949494'; // Блик на грани камня
-            ctx.beginPath();
-            ctx.moveTo(screenX, screenY - 14);
-            ctx.lineTo(screenX + 12, screenY);
-            ctx.lineTo(screenX + 6, screenY + 6);
-            ctx.closePath();
-            ctx.fill();
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.2)'; ctx.beginPath(); ctx.ellipse(screenX, screenY + 2, 14, 7, 0, 0, Math.PI * 2); ctx.fill();
+            ctx.fillStyle = '#7a7a7a'; ctx.beginPath();
+            ctx.moveTo(screenX - 12, screenY); ctx.lineTo(screenX, screenY - 14); ctx.lineTo(screenX + 12, screenY);
+            ctx.lineTo(screenX + 6, screenY + 6); ctx.lineTo(screenX - 6, screenY + 6); ctx.closePath(); ctx.fill();
         }
     });
 
     requestAnimationFrame(gameLoop);
 }
 
-// Запуск обновленного движка
 requestAnimationFrame(gameLoop);
 
 function toggleCraftMenu() {
