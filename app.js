@@ -1,236 +1,431 @@
 const socket = io('https://z-zone-online.onrender.com');
 
-// Инициализируем наш собственный 3D движок Ali3D!
-const engine = new Ali3D('gameCanvas', 400, 20);
+const canvas = document.getElementById('gameCanvas');
+const ctx = canvas.getContext('2d');
 
-// Позиция локального игрока в мире
-let player3D = { x: 1500, z: 1500, yaw: 0, pitch: 0 };
+function resizeCanvas() {
+    canvas.width = window.innerWidth;
+    canvas.height = window.innerHeight;
+}
+window.addEventListener('resize', resizeCanvas);
+resizeCanvas();
 
 let localPlayers = {};
-let myId = "local_player";
-localPlayers[myId] = { x: player3D.x, z: player3D.z, yaw: 0 };
+let myId = "local_player"; 
 
-const TILE_SIZE = 60;
-const CHUNK_SIZE = 6;
-const CHUNK_PIXELS = CHUNK_SIZE * TILE_SIZE;
+localPlayers[myId] = { id: myId, x: 1500, y: 1500, hp: 100 };
+
+// --- НАСТРОЙКИ МИРА ---
+const TILE_SIZE = 48;       
+const CHUNK_SIZE = 8;      
+const CHUNK_PIXELS = CHUNK_SIZE * TILE_SIZE; 
+
+const PLAYER_RADIUS = 14;
+const TREE_RADIUS = 16;
+const STONE_RADIUS = 12;
+const ZOMBIE_RADIUS = 14;
+
 const loadedChunks = {};
-let networkZombies = [];
+let networkZombies = []; 
 
-function isHost() { return Object.keys(localPlayers).sort()[0] === myId; }
+// Угол поворота камеры: 0 = 0°, 1 = 90°, 2 = 180°, 3 = 270°
+let cameraAngle = 0; 
 
-// Обработчик кнопки смены лица (цикл: 1 -> 3 -> 2 -> 1)
-document.getElementById('cam-toggle').addEventListener('click', () => {
-    let nextMode = engine.viewMode === 1 ? 3 : (engine.viewMode === 3 ? 2 : 1);
-    engine.setViewMode(nextMode);
-    
-    const labels = { 1: "Камера: 1-е лицо", 3: "Камера: 3-е лицо", 2: "Камера: Вид сверху" };
-    document.getElementById('cam-toggle').innerText = labels[nextMode];
+// Модифицированная функция изометрии с поддержкой вращения осей
+function toIso(x, y) {
+    let rotX = x;
+    let rotY = y;
+
+    // Вращаем декартовы координаты вокруг условного центра игрока перед проекцией
+    if (cameraAngle === 1) { // 90 градусов
+        rotX = y;
+        rotY = -x;
+    } else if (cameraAngle === 2) { // 180 градусов
+        rotX = -x;
+        rotY = -y;
+    } else if (cameraAngle === 3) { // 270 градусов
+        rotX = -y;
+        rotY = x;
+    }
+
+    return { x: (rotX - rotY), y: (rotX + rotY) / 2 };
+}
+
+// Переключение поворота по нажатию кнопки
+document.getElementById('rotate-btn').addEventListener('click', () => {
+    cameraAngle = (cameraAngle + 1) % 4;
 });
 
+function isHost() {
+    const playerIds = Object.keys(localPlayers).sort();
+    return playerIds[0] === myId; 
+}
+
+// Генератор изометрических чанков
 function getChunk(chunkX, chunkY) {
     const chunkKey = `${chunkX},${chunkY}`;
     if (loadedChunks[chunkKey]) return loadedChunks[chunkKey];
 
-    const tiles = []; const zombies = [];
+    const tiles = [];
+    const zombies = [];
+
     for (let x = 0; x < CHUNK_SIZE; x++) {
         tiles[x] = [];
-        for (let z = 0; z < CHUNK_SIZE; z++) {
-            const worldX = chunkX * CHUNK_SIZE + x;
-            const worldZ = chunkY * CHUNK_SIZE + z;
-            const noise = Math.abs(Math.sin(worldX * 12.9898 + worldZ * 78.233)) * 43758.5453 % 1;
+        for (let y = 0; y < CHUNK_SIZE; y++) {
+            const worldTileX = chunkX * CHUNK_SIZE + x;
+            const worldTileY = chunkY * CHUNK_SIZE + y;
+            
+            const noise = Math.abs(Math.sin(worldTileX * 12.9898 + worldTileY * 78.233)) * 43758.5453 % 1;
+            
+            let color = '#3c7a2b'; 
+            let hasStaticObject = null;
 
-            let color = '#2c5e1a'; let objType = null;
-            if (noise > 0.85) color = '#387822';
-            if (noise < 0.15) color = '#1e4011';
-            if (noise > 0.97) objType = 'tree';
-            else if (noise < 0.015) objType = 'stone';
+            if (noise > 0.88) color = '#488e35'; 
+            if (noise < 0.12) color = '#326623'; 
+            
+            if (noise > 0.96) {
+                hasStaticObject = 'tree';
+            } else if (noise < 0.02) {
+                hasStaticObject = 'stone';
+            }
+            
+            tiles[x][y] = { color: color, object: hasStaticObject };
 
-            tiles[x][z] = { color: color, object: objType };
-
-            if (!objType && noise > 0.94 && noise < 0.952) {
+            if (!hasStaticObject && noise > 0.94 && noise < 0.955) {
                 zombies.push({
-                    id: `z3d_${worldX}_${worldZ}`, x: worldX * TILE_SIZE + TILE_SIZE/2, z: worldZ * TILE_SIZE + TILE_SIZE/2,
-                    speed: 1.0, state: 'idle', targetX: worldX * TILE_SIZE + TILE_SIZE/2, targetZ: worldZ * TILE_SIZE + TILE_SIZE/2, lastDecision: 0
+                    id: `zombie_${worldTileX}_${worldTileY}`,
+                    x: worldTileX * TILE_SIZE + TILE_SIZE / 2,
+                    y: worldTileY * TILE_SIZE + TILE_SIZE / 2,
+                    targetX: worldTileX * TILE_SIZE + TILE_SIZE / 2,
+                    targetY: worldTileY * TILE_SIZE + TILE_SIZE / 2,
+                    speed: 1.5,
+                    hp: 50,
+                    state: 'idle',
+                    lastDecision: 0
                 });
             }
         }
     }
+
     loadedChunks[chunkKey] = { tiles: tiles, zombies: zombies };
     return loadedChunks[chunkKey];
 }
 
-// --- ДВУХЗОННЫЙ СЕНСОР (SPLIT-TOUCH) ---
-let joystickActive = false; let joystickStart = { x: 0, y: 0 }; let joystickCurrent = { x: 0, y: 0 };
-let lookActive = false; let lastLookTouch = { x: 0, y: 0 };
+function drawIsoTile(screenX, screenY, size, color) {
+    ctx.fillStyle = color;
+    ctx.beginPath();
+    ctx.moveTo(screenX, screenY);                
+    ctx.lineTo(screenX + size, screenY + size/2); 
+    ctx.lineTo(screenX, screenY + size);         
+    ctx.lineTo(screenX - size, screenY + size/2); 
+    ctx.closePath();
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(0, 0, 0, 0.05)';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+}
+
+// --- СЕНСОРНОЕ УПРАВЛЕНИЕ ---
+const joystickZone = document.getElementById('joystick-zone');
+let joystickActive = false;
+let joystickStart = { x: 0, y: 0 };
+let joystickCurrent = { x: 0, y: 0 };
 
 window.addEventListener('touchstart', (e) => {
-    for (let i = 0; i < e.touches.length; i++) {
-        const touch = e.touches[i];
-        if (touch.clientX < window.innerWidth / 2 && !joystickActive) {
-            joystickActive = true; joystickStart = { x: touch.clientX, y: touch.clientY }; joystickCurrent = { x: touch.clientX, y: touch.clientY };
-        }
-        if (touch.clientX >= window.innerWidth / 2 && !lookActive) {
-            lookActive = true; lastLookTouch = { x: touch.clientX, y: touch.clientY };
-        }
+    const touch = e.touches[0];
+    if (touch.clientX < window.innerWidth / 2) {
+        joystickActive = true;
+        joystickStart = { x: touch.clientX, y: touch.clientY };
+        joystickCurrent = { x: touch.clientX, y: touch.clientY };
+        joystickZone.style.left = (touch.clientX - 45) + 'px';
+        joystickZone.style.bottom = (window.innerHeight - touch.clientY - 45) + 'px';
     }
 });
 
 window.addEventListener('touchmove', (e) => {
-    for (let i = 0; i < e.touches.length; i++) {
-        const touch = e.touches[i];
-        if (touch.clientX < window.innerWidth / 2 && joystickActive) joystickCurrent = { x: touch.clientX, y: touch.clientY };
-        if (touch.clientX >= window.innerWidth / 2 && lookActive) {
-            const movementX = touch.clientX - lastLookTouch.x;
-            const movementY = touch.clientY - lastLookTouch.y;
-            player3D.yaw += movementX * 0.007;
-            player3D.pitch -= movementY * 0.007;
-            player3D.pitch = Math.max(-Math.PI / 3, Math.min(Math.PI / 3, player3D.pitch));
-            lastLookTouch = { x: touch.clientX, y: touch.clientY };
-        }
-    }
+    if (!joystickActive) return;
+    const touch = e.touches[0];
+    joystickCurrent = { x: touch.clientX, y: touch.clientY };
 });
 
-window.addEventListener('touchend', (e) => {
-    if (e.touches.length === 0) { joystickActive = false; lookActive = false; }
-    else {
-        let hasLeft = false; let hasRight = false;
-        for (let i = 0; i < e.touches.length; i++) {
-            if (e.touches[i].clientX < window.innerWidth / 2) hasLeft = true;
-            if (e.touches[i].clientX >= window.innerWidth / 2) hasRight = true;
-        }
-        if (!hasLeft) joystickActive = false;
-        if (!hasRight) lookActive = false;
-    }
+window.addEventListener('touchend', () => {
+    joystickActive = false;
+    joystickZone.style.left = '40px';
+    joystickZone.style.bottom = '30px';
 });
 
-// --- СЕТЕВАЯ СИНХРОНИЗАЦИЯ ---
+// --- СЕТЬ ---
 socket.on('connect', () => {
-    const cx = localPlayers[myId].x; const cz = localPlayers[myId].z;
-    delete localPlayers[myId]; myId = socket.id;
-    localPlayers[myId] = { id: myId, x: cx, z: cz, yaw: player3D.yaw };
+    const currentX = localPlayers[myId].x;
+    const currentY = localPlayers[myId].y;
+    delete localPlayers[myId];
+    myId = socket.id;
+    localPlayers[myId] = { id: myId, x: currentX, y: currentY, hp: 100 };
 });
+
 socket.on('currentPlayers', (serverPlayers) => {
-    Object.keys(serverPlayers).forEach(id => {
-        if (id !== myId) localPlayers[id] = { id: id, x: serverPlayers[id].x, z: serverPlayers[id].y, yaw: 0, targetX: serverPlayers[id].x, targetZ: serverPlayers[id].y };
+    Object.keys(serverPlayers).forEach((id) => {
+        if (id !== myId) {
+            localPlayers[id] = {
+                id: id, x: serverPlayers[id].x, y: serverPlayers[id].y,
+                targetX: serverPlayers[id].x, targetY: serverPlayers[id].y, hp: serverPlayers[id].hp
+            };
+        }
     });
 });
-socket.on('newPlayer', p => { if (p.id !== myId) localPlayers[p.id] = { id: p.id, x: p.x, z: p.y, yaw: 0, targetX: p.x, targetZ: p.y }; });
-socket.on('playerMoved', p => { if (localPlayers[p.id] && p.id !== myId) { localPlayers[p.id].targetX = p.x; localPlayers[p.id].targetZ = p.y; } });
-socket.on('playerDisconnected', id => { delete localPlayers[id]; });
-socket.on('zombiesUpdate', data => { if (!isHost()) networkZombies = data.zombies; });
 
-let lastUpdateTime = 0; let lastZombieNetTime = 0;
+socket.on('newPlayer', (playerInfo) => {
+    if (playerInfo.id !== myId) {
+        localPlayers[playerInfo.id] = {
+            id: playerInfo.id, x: playerInfo.x, y: playerInfo.y,
+            targetX: playerInfo.x, targetY: playerInfo.y, hp: playerInfo.hp
+        };
+    }
+});
 
-// --- ГЛАВНЫЙ ИГРОВОЙ ЦИКЛ ---
+socket.on('playerMoved', (playerInfo) => {
+    if (localPlayers[playerInfo.id] && playerInfo.id !== myId) {
+        localPlayers[playerInfo.id].targetX = playerInfo.x;
+        localPlayers[playerInfo.id].targetY = playerInfo.y;
+    }
+});
+
+socket.on('playerDisconnected', (id) => { delete localPlayers[id]; });
+
+socket.on('zombiesUpdate', (data) => {
+    if (!isHost()) { networkZombies = data.zombies; }
+});
+
+let lastUpdateTime = 0;
+let lastZombieNetTime = 0;
+
+// --- ЦИКЛ ИГРЫ ---
 function gameLoop() {
-    engine.clear('#1a1c1e', '#142410');
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
 
     const me = localPlayers[myId];
     if (!me) { requestAnimationFrame(gameLoop); return; }
 
-    const activeObstacles = []; const localZombies = [];
-    const currentChunkX = Math.floor(player3D.x / CHUNK_PIXELS);
-    const currentChunkZ = Math.floor(player3D.z / CHUNK_PIXELS);
-    const viewRadius = 3;
+    const activeObstacles = [];
+    const localZombies = [];
+
+    const currentChunkX = Math.floor(me.x / CHUNK_PIXELS);
+    const currentChunkY = Math.floor(me.y / CHUNK_PIXELS);
+    const viewRadius = 3; // Чуть увеличили радиус для плавного кручения
 
     for (let cx = currentChunkX - viewRadius; cx <= currentChunkX + viewRadius; cx++) {
-        for (let cz = currentChunkZ - viewRadius; cz <= currentChunkZ + viewRadius; cz++) {
-            const chunk = getChunk(cx, cz);
+        for (let cy = currentChunkY - viewRadius; cy <= currentChunkY + viewRadius; cy++) {
+            const chunk = getChunk(cx, cy);
             for (let x = 0; x < CHUNK_SIZE; x++) {
-                for (let z = 0; z < CHUNK_SIZE; z++) {
-                    const wX = (cx * CHUNK_SIZE + x) * TILE_SIZE;
-                    const wZ = (cz * CHUNK_SIZE + z) * TILE_SIZE;
-                    if (chunk.tiles[x][z].object) {
-                        activeObstacles.push({ type: chunk.tiles[x][z].object, x: wX + TILE_SIZE/2, z: wZ + TILE_SIZE/2, r: 15 });
+                for (let y = 0; y < CHUNK_SIZE; y++) {
+                    if (chunk.tiles[x][y].object) {
+                        activeObstacles.push({
+                            type: chunk.tiles[x][y].object,
+                            x: (cx * CHUNK_SIZE + x) * TILE_SIZE + TILE_SIZE / 2,
+                            y: (cy * CHUNK_SIZE + y) * TILE_SIZE + TILE_SIZE / 2,
+                            radius: chunk.tiles[x][y].object === 'tree' ? TREE_RADIUS : STONE_RADIUS
+                        });
                     }
-                    // Пушим блоки земли прямо в движок
-                    engine.pushFloor(wX, wZ, wX + TILE_SIZE, wZ, wX + TILE_SIZE, wZ + TILE_SIZE, wX, wZ + TILE_SIZE, chunk.tiles[x][z].color);
                 }
             }
             chunk.zombies.forEach(z => localZombies.push(z));
         }
     }
 
-    // Джойстик перемещения
+    // Движение игрока
     if (joystickActive) {
-        const dx = joystickCurrent.x - joystickStart.x; const dy = joystickCurrent.y - joystickStart.y;
-        const dist = Math.sqrt(dx * dx + dy * dy);
+        const dx = joystickCurrent.x - joystickStart.x;
+        const dy = joystickCurrent.y - joystickStart.y;
+        const distance = Math.sqrt(dx * dx + dy * dy);
 
-        if (dist > 5) {
-            const speed = 3.5;
-            const moveAngle = Math.atan2(dy, dx) + player3D.yaw + Math.PI / 2;
-            let nextX = player3D.x + Math.sin(moveAngle) * speed;
-            let nextZ = player3D.z - Math.cos(moveAngle) * speed;
+        if (distance > 5) {
+            const speed = 4;
+            
+            // ВАЖНО: Направление ходьбы джойстика должно адаптироваться под развернутый экран!
+            let moveDx = dx / distance;
+            let moveDy = dy / distance;
 
-            let canMove = true;
-            for (let obs of activeObstacles) {
-                if (Math.sqrt(Math.pow(nextX - obs.x, 2) + Math.pow(nextZ - obs.z, 2)) < 16 + obs.r) { canMove = false; break; }
+            if (cameraAngle === 1) {
+                let temp = moveDx; moveDx = -moveDy; moveDy = temp;
+            } else if (cameraAngle === 2) {
+                moveDx = -moveDx; moveDy = -moveDy;
+            } else if (cameraAngle === 3) {
+                let temp = moveDx; moveDx = moveDy; moveDy = -temp;
             }
-            if (canMove) {
-                player3D.x = nextX; player3D.z = nextZ;
-                me.x = player3D.x; me.z = player3D.z;
 
-                const now = Date.now();
-                if (myId !== "local_player" && now - lastUpdateTime > 45) {
-                    socket.emit('playerMovement', { x: player3D.x, y: player3D.z });
-                    lastUpdateTime = now;
-                }
+            let nextX = me.x + moveDx * speed;
+            let nextY = me.y + moveDy * speed;
+
+            let canMoveX = true; let canMoveY = true;
+
+            for (let obs of activeObstacles) {
+                if (Math.sqrt(Math.pow(nextX - obs.x, 2) + Math.pow(me.y - obs.y, 2)) < PLAYER_RADIUS + obs.radius) canMoveX = false;
+                if (Math.sqrt(Math.pow(me.x - obs.x, 2) + Math.pow(nextY - obs.y, 2)) < PLAYER_RADIUS + obs.radius) canMoveY = false;
+            }
+
+            if (canMoveX) me.x = nextX;
+            if (canMoveY) me.y = nextY;
+
+            const now = Date.now();
+            if (myId !== "local_player" && now - lastUpdateTime > 45) {
+                socket.emit('playerMovement', { x: me.x, y: me.y });
+                lastUpdateTime = now;
             }
         }
     }
 
-    // Расчет ИИ Зомби хостом
+    // Расчет ИИ зомби (Хост)
     const now = Date.now();
     if (isHost()) {
         localZombies.forEach(z => {
-            const distToMe = Math.sqrt(Math.pow(player3D.x - z.x, 2) + Math.pow(player3D.z - z.z, 2));
-            if (distToMe < 250) { z.state = 'chase'; z.targetX = player3D.x; z.targetZ = player3D.z; } 
-            else {
+            let closestPlayer = me;
+            let minDist = Math.sqrt(Math.pow(me.x - z.x, 2) + Math.pow(me.y - z.y, 2));
+
+            Object.keys(localPlayers).forEach(id => {
+                const p = localPlayers[id];
+                const d = Math.sqrt(Math.pow(p.x - z.x, 2) + Math.pow(p.y - z.y, 2));
+                if (d < minDist) { minDist = d; closestPlayer = p; }
+            });
+
+            if (minDist < 300) {
+                z.state = 'chase'; z.targetX = closestPlayer.x; z.targetY = closestPlayer.y;
+            } else {
                 if (z.state === 'chase') z.state = 'idle';
-                if (now - z.lastDecision > 2500) {
-                    z.lastDecision = now; z.targetX = z.x + (Math.random() * 80 - 40); z.targetZ = z.z + (Math.random() * 80 - 40);
+                if (now - z.lastDecision > 2000) {
+                    z.lastDecision = now;
+                    if (Math.random() > 0.5) {
+                        z.targetX = z.x + (Math.random() * 120 - 60); z.targetY = z.y + (Math.random() * 120 - 60);
+                    }
                 }
             }
-            const zDx = z.targetX - z.x; const zDz = z.targetZ - z.z; const zDist = Math.sqrt(zDx * zDx + zDz * zDz);
-            if (zDist > 3) { z.x += (zDx / zDist) * z.speed; z.z += (zDz / zDist) * z.speed; }
+
+            const zDx = z.targetX - z.x; const zDy = z.targetY - z.y;
+            const zDist = Math.sqrt(zDx * zDx + zDy * zDy);
+
+            if (zDist > 5) {
+                let zNextX = z.x + (zDx / zDist) * z.speed; let zNextY = z.y + (zDy / zDist) * z.speed;
+                let zCanMoveX = true; let zCanMoveY = true;
+
+                for (let obs of activeObstacles) {
+                    if (Math.sqrt(Math.pow(zNextX - obs.x, 2) + Math.pow(z.y - obs.y, 2)) < ZOMBIE_RADIUS + obs.radius) zCanMoveX = false;
+                    if (Math.sqrt(Math.pow(z.x - obs.x, 2) + Math.pow(zNextY - obs.y, 2)) < ZOMBIE_RADIUS + obs.radius) zCanMoveY = false;
+                }
+                if (zCanMoveX) z.x = zNextX; if (zCanMoveY) z.y = zNextY;
+            }
         });
 
         if (now - lastZombieNetTime > 60 && myId !== "local_player") {
-            socket.emit('shareZombies', localZombies.map(z => ({ id: z.id, x: z.x, y: z.z, state: z.state })));
+            socket.emit('updateZombies', localZombies.map(z => ({ id: z.id, x: z.x, y: z.y, state: z.state }))); 
             lastZombieNetTime = now;
         }
     }
 
-    // Синхронизируем положение камеры движка с позицией игрока
-    engine.updateCamera(player3D.x, player3D.z, player3D.yaw, player3D.pitch);
+    // Камера центрируется на игроке с учетом текущего угла вращения
+    const myIso = toIso(me.x, me.y);
+    const cameraX = canvas.width / 2 - myIso.x;
+    const cameraY = canvas.height / 2 - myIso.y;
 
-    // Загружаем статичные объекты чанка в движок
-    activeObstacles.forEach(obs => engine.pushSprite(obs.type, obs.x, obs.z));
+    // Рендер земли (с поддержкой вращения)
+    for (let cx = currentChunkX - viewRadius; cx <= currentChunkX + viewRadius; cx++) {
+        for (let cy = currentChunkY - viewRadius; cy <= currentChunkY + viewRadius; cy++) {
+            const chunk = getChunk(cx, cy);
+            for (let x = 0; x < CHUNK_SIZE; x++) {
+                for (let y = 0; y < CHUNK_SIZE; y++) {
+                    const worldX = (cx * CHUNK_SIZE + x) * TILE_SIZE; 
+                    const worldY = (cy * CHUNK_SIZE + y) * TILE_SIZE;
+                    const isoTile = toIso(worldX, worldY);
+                    const screenX = isoTile.x + cameraX; 
+                    const screenY = isoTile.y + cameraY;
 
-    // Загружаем зомби в движок
-    const currentZombies = isHost() ? localZombies : networkZombies;
-    currentZombies.forEach(z => engine.pushSprite('zombie', z.x, z.z || z.y, { state: z.state }));
-
-    // Если включено 3-е лицо или вид сверху — рисуем зеленое тело самого себя!
-    if (engine.viewMode !== 1) {
-        engine.pushSprite('local_body', player3D.x, player3D.z, { name: "Вы" });
+                    if (screenX >= -TILE_SIZE*2 && screenX <= canvas.width + TILE_SIZE*2 &&
+                        screenY >= -TILE_SIZE*2 && screenY <= canvas.height + TILE_SIZE*2) {
+                        drawIsoTile(screenX, screenY, TILE_SIZE, chunk.tiles[x][y].color);
+                    }
+                }
+            }
+        }
     }
 
-    // Загружаем сетевых игроков в движок
-    Object.keys(localPlayers).forEach(id => {
-        if (id !== myId) {
-            const p = localPlayers[id];
-            if (p.targetX !== undefined) { p.x += (p.targetX - p.x)*0.1; p.z += (p.targetZ - p.z)*0.1; }
-            engine.pushSprite('net_player', p.x, p.z, { id: id, name: `Игрок_${id.substring(0,4)}` });
-        }
+    // Очередь сортировки по глубине. Формула sortY теперь тоже адаптируется под вращение камеры!
+    const renderQueue = [];
+
+    function getSortY(wx, wy) {
+        if (cameraAngle === 1) return wy - wx;
+        if (cameraAngle === 2) return -wx - wy;
+        if (cameraAngle === 3) return -wy + wx;
+        return wx + wy; // Стандартный режим (0 градусов)
+    }
+
+    activeObstacles.forEach(obs => {
+        renderQueue.push({ type: obs.type, worldX: obs.x, worldY: obs.y, sortY: getSortY(obs.x, obs.y) });
     });
 
-    // Отрисовываем сцену
-    engine.render();
+    const zombiesToRender = isHost() ? localZombies : networkZombies;
+    zombiesToRender.forEach(z => {
+        if (!isHost()) {
+            const localZombieRef = localZombies.find(lz => lz.id === z.id);
+            if (localZombieRef) {
+                localZombieRef.x += (z.x - localZombieRef.x) * 0.2;
+                localZombieRef.y += (z.y - localZombieRef.y) * 0.2;
+                z.x = localZombieRef.x; z.y = localZombieRef.y;
+            }
+        }
+        renderQueue.push({ type: 'zombie', worldX: z.x, worldY: z.y, sortY: getSortY(z.x, z.y), state: z.state });
+    });
+
+    Object.keys(localPlayers).forEach((id) => {
+        const p = localPlayers[id];
+        if (id !== myId && p.targetX !== undefined && p.targetY !== undefined) {
+            p.x += (p.targetX - p.x) * 0.15; p.y += (p.targetY - p.y) * 0.15;
+        }
+        renderQueue.push({ type: 'player', id: id, worldX: p.x, worldY: p.y, sortY: getSortY(p.x, p.y) });
+    });
+
+    // Сортируем: то что дальше, рисуется первым
+    renderQueue.sort((a, b) => a.sortY - b.sortY);
+
+    // Отрисовка объектов поверх земли
+    renderQueue.forEach((obj) => {
+        const isoPos = toIso(obj.worldX, obj.worldY);
+        const screenX = isoPos.x + cameraX; const screenY = isoPos.y + cameraY;
+
+        if (obj.type === 'player') {
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.25)'; ctx.beginPath(); ctx.ellipse(screenX, screenY + 2, 16, 8, 0, 0, Math.PI * 2); ctx.fill();
+            ctx.fillStyle = (obj.id === myId) ? '#00ff66' : '#ff3333';
+            ctx.beginPath(); ctx.arc(screenX, screenY - 12, 18, 0, Math.PI * 2); ctx.fill();
+            ctx.strokeStyle = '#fff'; ctx.lineWidth = 3; ctx.stroke();
+            ctx.fillStyle = '#fff'; ctx.font = 'bold 13px Arial'; ctx.textAlign = 'center';
+            ctx.fillText(obj.id === myId ? "Вы" : `Игрок_${obj.id.substring(0, 4)}`, screenX, screenY - 40);
+
+        } else if (obj.type === 'zombie') {
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.3)'; ctx.beginPath(); ctx.ellipse(screenX, screenY + 2, 16, 8, 0, 0, Math.PI * 2); ctx.fill();
+            ctx.fillStyle = '#4a753c'; ctx.beginPath(); ctx.arc(screenX, screenY - 12, 18, 0, Math.PI * 2); ctx.fill();
+            ctx.strokeStyle = '#223d19'; ctx.lineWidth = 3; ctx.stroke();
+            ctx.fillStyle = obj.state === 'chase' ? '#ff0000' : '#ff9900';
+            ctx.beginPath(); ctx.arc(screenX - 5, screenY - 16, 3, 0, Math.PI * 2); ctx.fill();
+            ctx.beginPath(); ctx.arc(screenX + 5, screenY - 16, 3, 0, Math.PI * 2); ctx.fill();
+            ctx.fillStyle = '#ff4444'; ctx.font = '900 11px Arial'; ctx.textAlign = 'center';
+            ctx.fillText(obj.state === 'chase' ? "⚠️ ЗОМБИ" : "Zzz...", screenX, screenY - 38);
+
+        } else if (obj.type === 'tree') {
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.3)'; ctx.beginPath(); ctx.ellipse(screenX, screenY, 20, 10, 0, 0, Math.PI * 2); ctx.fill();
+            ctx.fillStyle = '#6e4720'; ctx.fillRect(screenX - 5, screenY - 35, 10, 35);
+            ctx.fillStyle = '#1e5912'; ctx.beginPath(); ctx.arc(screenX, screenY - 50, 24, 0, Math.PI * 2); ctx.fill();
+            ctx.fillStyle = '#266e18'; ctx.beginPath(); ctx.arc(screenX - 6, screenY - 54, 18, 0, Math.PI * 2); ctx.fill();
+
+        } else if (obj.type === 'stone') {
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.2)'; ctx.beginPath(); ctx.ellipse(screenX, screenY + 2, 14, 7, 0, 0, Math.PI * 2); ctx.fill();
+            ctx.fillStyle = '#7a7a7a'; ctx.beginPath();
+            ctx.moveTo(screenX - 12, screenY); ctx.lineTo(screenX, screenY - 14); ctx.lineTo(screenX + 12, screenY);
+            ctx.lineTo(screenX + 6, screenY + 6); ctx.lineTo(screenX - 6, screenY + 6); ctx.closePath(); ctx.fill();
+        }
+    });
 
     requestAnimationFrame(gameLoop);
 }
 
 requestAnimationFrame(gameLoop);
 
-function toggleCraftMenu() { document.getElementById('craft-menu').classList.toggle('hidden'); }
+function toggleCraftMenu() {
+    document.getElementById('craft-menu').classList.toggle('hidden');
+}
